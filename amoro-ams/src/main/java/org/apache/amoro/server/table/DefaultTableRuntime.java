@@ -42,8 +42,6 @@ import org.apache.amoro.server.table.cleanup.TableRuntimeCleanupState;
 import org.apache.amoro.server.utils.IcebergTableUtil;
 import org.apache.amoro.server.utils.SnowflakeIdGenerator;
 import org.apache.amoro.shade.guava32.com.google.common.collect.Lists;
-import org.apache.amoro.table.BaseTable;
-import org.apache.amoro.table.ChangeTable;
 import org.apache.amoro.table.MixedTable;
 import org.apache.amoro.table.StateKey;
 import org.apache.amoro.table.TableRuntimeStore;
@@ -303,8 +301,8 @@ public class DefaultTableRuntime extends AbstractTableRuntime {
       this.optimizingMetrics.optimizerGroupChanged(getGroupName());
     }
 
-    SnapshotUpdate snapshotUpdate = collectSnapshotUpdate(table);
-    if (!configChanged && !snapshotUpdate.changed) {
+    SnapshotChange snapshotChange = collectSnapshotChange(table);
+    if (!configChanged && !snapshotChange.changed) {
       return this;
     }
 
@@ -319,12 +317,12 @@ public class DefaultTableRuntime extends AbstractTableRuntime {
               })
           .updateGroup(g -> finalNewGroupName);
     }
-    if (snapshotUpdate.changed) {
+    if (snapshotChange.changed) {
       operation.updateState(
           OPTIMIZING_STATE_KEY,
           s -> {
-            s.setCurrentSnapshotId(snapshotUpdate.currentSnapshotId);
-            s.setCurrentChangeSnapshotId(snapshotUpdate.currentChangeSnapshotId);
+            s.setCurrentSnapshotId(snapshotChange.currentSnapshotId);
+            s.setCurrentChangeSnapshotId(snapshotChange.currentChangeSnapshotId);
             return s;
           });
     }
@@ -542,7 +540,7 @@ public class DefaultTableRuntime extends AbstractTableRuntime {
         1);
   }
 
-  private SnapshotUpdate collectSnapshotUpdate(AmoroTable<?> amoroTable) {
+  private SnapshotChange collectSnapshotChange(AmoroTable<?> amoroTable) {
     MixedTable table = (MixedTable) amoroTable.originalTable();
     tableSummaryMetrics.refreshSnapshots(table);
 
@@ -573,7 +571,8 @@ public class DefaultTableRuntime extends AbstractTableRuntime {
             currentSnapshotId);
       }
     }
-    return new SnapshotUpdate(currentSnapshotId, currentChangeSnapshotId, changed);
+
+    return new SnapshotChange(currentSnapshotId, currentChangeSnapshotId, changed);
   }
 
   private long doRefreshSnapshots(UnkeyedTable table) {
@@ -590,12 +589,12 @@ public class DefaultTableRuntime extends AbstractTableRuntime {
     return currentSnapshotId;
   }
 
-  private static class SnapshotUpdate {
+  private static class SnapshotChange {
     private final long currentSnapshotId;
     private final long currentChangeSnapshotId;
     private final boolean changed;
 
-    private SnapshotUpdate(long currentSnapshotId, long currentChangeSnapshotId, boolean changed) {
+    private SnapshotChange(long currentSnapshotId, long currentChangeSnapshotId, boolean changed) {
       this.currentSnapshotId = currentSnapshotId;
       this.currentChangeSnapshotId = currentChangeSnapshotId;
       this.changed = changed;
