@@ -287,31 +287,48 @@ public class DefaultTableRuntime extends AbstractTableRuntime {
 
   public DefaultTableRuntime refresh(AmoroTable<?> table) {
     Map<String, String> tableConfig = table.properties();
-    TableConfiguration newConfiguration = TableConfigurations.parseTableConfig(tableConfig);
-    String newGroupName = newConfiguration.getOptimizingConfig().getOptimizerGroup();
+    boolean configChanged = !Objects.equals(getTableConfig(), tableConfig);
+    String newGroupName = getGroupName();
+    boolean groupChanged = false;
+    if (configChanged) {
+      TableConfiguration newConfiguration = TableConfigurations.parseTableConfig(tableConfig);
+      newGroupName = newConfiguration.getOptimizingConfig().getOptimizerGroup();
+      groupChanged = !Objects.equals(getGroupName(), newGroupName);
+    }
 
-    if (!Objects.equals(getGroupName(), newGroupName)) {
+    if (groupChanged) {
       if (optimizingProcess != null) {
         optimizingProcess.close(false);
       }
       this.optimizingMetrics.optimizerGroupChanged(getGroupName());
     }
 
-    store()
-        .begin()
-        .updateTableConfig(
-            config -> {
-              config.clear();
-              config.putAll(tableConfig);
-            })
-        .updateGroup(g -> newGroupName)
-        .updateState(
-            OPTIMIZING_STATE_KEY,
-            s -> {
-              refreshSnapshots(table, s);
-              return s;
-            })
-        .commit();
+    SnapshotUpdate snapshotUpdate = collectSnapshotUpdate(table);
+    if (!configChanged && !snapshotUpdate.changed) {
+      return this;
+    }
+
+    TableRuntimeStore.TableRuntimeOperation operation = store().begin();
+    if (configChanged) {
+      String finalNewGroupName = newGroupName;
+      operation
+          .updateTableConfig(
+              config -> {
+                config.clear();
+                config.putAll(tableConfig);
+              })
+          .updateGroup(g -> finalNewGroupName);
+    }
+    if (snapshotUpdate.changed) {
+      operation.updateState(
+          OPTIMIZING_STATE_KEY,
+          s -> {
+            s.setCurrentSnapshotId(snapshotUpdate.currentSnapshotId);
+            s.setCurrentChangeSnapshotId(snapshotUpdate.currentChangeSnapshotId);
+            return s;
+          });
+    }
+    operation.commit();
     return this;
   }
 
@@ -525,40 +542,38 @@ public class DefaultTableRuntime extends AbstractTableRuntime {
         1);
   }
 
-  private boolean refreshSnapshots(AmoroTable<?> amoroTable, TableRuntimeOptimizingState state) {
+  private SnapshotUpdate collectSnapshotUpdate(AmoroTable<?> amoroTable) {
     MixedTable table = (MixedTable) amoroTable.originalTable();
     tableSummaryMetrics.refreshSnapshots(table);
-    long lastSnapshotId = state.getCurrentSnapshotId();
+
+    long currentSnapshotId;
+    long currentChangeSnapshotId = Constants.INVALID_SNAPSHOT_ID;
+
     if (table.isKeyedTable()) {
-      long changeSnapshotId = state.getCurrentChangeSnapshotId();
-      ChangeTable changeTable = table.asKeyedTable().changeTable();
-      BaseTable baseTable = table.asKeyedTable().baseTable();
+      currentChangeSnapshotId = doRefreshSnapshots(table.asKeyedTable().changeTable());
+      currentSnapshotId = doRefreshSnapshots(table.asKeyedTable().baseTable());
+    } else {
+      currentSnapshotId = doRefreshSnapshots((UnkeyedTable) table);
+    }
 
-      long currentChangeSnapshotId = doRefreshSnapshots(changeTable);
-      long currentSnapshotId = doRefreshSnapshots(baseTable);
-
-      if (currentSnapshotId != lastSnapshotId || currentChangeSnapshotId != changeSnapshotId) {
+    boolean changed =
+        currentSnapshotId != getCurrentSnapshotId()
+            || currentChangeSnapshotId != getCurrentChangeSnapshotId();
+    if (changed) {
+      if (table.isKeyedTable()) {
         LOG.debug(
             "Refreshing table {} with base snapshot id {} and change snapshot id {}",
             getTableIdentifier(),
             currentSnapshotId,
             currentChangeSnapshotId);
-        state.setCurrentChangeSnapshotId(currentChangeSnapshotId);
-        state.setCurrentSnapshotId(currentSnapshotId);
-        return true;
-      }
-    } else {
-      long currentSnapshotId = doRefreshSnapshots((UnkeyedTable) table);
-      if (currentSnapshotId != lastSnapshotId) {
+      } else {
         LOG.debug(
             "Refreshing table {} with base snapshot id {}",
             getTableIdentifier(),
             currentSnapshotId);
-        state.setCurrentSnapshotId(currentSnapshotId);
-        return true;
       }
     }
-    return false;
+    return new SnapshotUpdate(currentSnapshotId, currentChangeSnapshotId, changed);
   }
 
   private long doRefreshSnapshots(UnkeyedTable table) {
@@ -573,5 +588,17 @@ public class DefaultTableRuntime extends AbstractTableRuntime {
         IcebergTableUtil.findLatestOptimizingSnapshot(table).orElse(null));
 
     return currentSnapshotId;
+  }
+
+  private static class SnapshotUpdate {
+    private final long currentSnapshotId;
+    private final long currentChangeSnapshotId;
+    private final boolean changed;
+
+    private SnapshotUpdate(long currentSnapshotId, long currentChangeSnapshotId, boolean changed) {
+      this.currentSnapshotId = currentSnapshotId;
+      this.currentChangeSnapshotId = currentChangeSnapshotId;
+      this.changed = changed;
+    }
   }
 }
